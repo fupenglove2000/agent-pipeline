@@ -1,2 +1,6 @@
-# batch-pipeline
-Idempotent, restartable batch processing with Spring Batch, plus an LLM-powered anomaly summary service (FastAPI).
+# agent-pipeline
+
+Running LLM agents over batch workloads in a way that survives production:
+LangGraph checkpoints, retry policies, cost ceilings and output evaluation.
+
+Work in progress — see [docs/adr](docs/adr) for the design decisions.
