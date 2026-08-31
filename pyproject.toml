@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-pipeline"
+version = "0.1.0"
+description = "Runs LLM agents over batch workloads with durable checkpoints, retries, cost ceilings and output evaluation."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "langgraph>=0.2",
+  "langchain>=0.3",
+  "fastapi>=0.115",
+  "sqlalchemy>=2.0",
+  "psycopg[binary]>=3.2",
+  "alembic>=1.13",
+  "structlog>=24.1",
+  "pydantic-settings>=2.4",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "testcontainers[postgres]>=4.8",
+  "ruff>=0.6",
+  "mypy>=1.11",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_pipeline"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+testpaths = ["tests"]
