@@ -22,7 +22,7 @@ def _initial_state(raw_input: str = "task") -> GraphState:
         "last_response": None,
         "parsed_result": None,
         "attempt_count": 0,
-        "token_cost": 0,
+        "total_tokens": 0,
     }
 
 
@@ -65,7 +65,7 @@ def test_always_malformed_stops_at_max_attempts_without_raising() -> None:
     assert result["parsed_result"] is None
 
 
-def test_token_cost_accumulates_across_attempts() -> None:
+def test_total_tokens_accumulates_across_attempts() -> None:
     llm = FakeChatModel(
         [
             LLMResponse(text=BAD_RESPONSE, token_usage=3),
@@ -77,5 +77,5 @@ def test_token_cost_accumulates_across_attempts() -> None:
 
     result = graph.invoke(_initial_state())
 
-    assert result["token_cost"] == 12
+    assert result["total_tokens"] == 12
     assert result["attempt_count"] == 3
