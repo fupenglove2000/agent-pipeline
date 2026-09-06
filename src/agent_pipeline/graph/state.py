@@ -19,4 +19,4 @@ class GraphState(TypedDict):
     last_response: str | None
     parsed_result: ParsedResult | None
     attempt_count: int
-    token_cost: int
+    total_tokens: int

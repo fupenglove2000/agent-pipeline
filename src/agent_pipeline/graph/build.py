@@ -16,6 +16,8 @@ MAX_PARSE_ATTEMPTS = 3
 def prepare(state: GraphState) -> dict[str, str]:
     # Prompt construction is the identity of raw_input for now — no templating
     # exists yet, and input normalisation belongs to ADR-0002's module, not here.
+    # Kept as a no-op node (not inlined into call_model) so prompt templating has
+    # a seam to land in later without changing the graph's shape.
     return {}
 
 
@@ -23,7 +25,7 @@ def _call_model(state: GraphState, llm: ChatModel) -> dict[str, object]:
     response = llm.complete(state["raw_input"])
     return {
         "last_response": response.text,
-        "token_cost": state["token_cost"] + response.token_usage,
+        "total_tokens": state["total_tokens"] + response.token_usage,
         "attempt_count": state["attempt_count"] + 1,
     }
 
