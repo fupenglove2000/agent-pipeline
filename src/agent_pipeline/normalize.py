@@ -26,6 +26,7 @@ Anything not listed above is out of scope on purpose. If a normalisation rule
 needs to change, it changes here — nowhere else re-implements any part of it.
 """
 
+import hashlib
 import json
 from typing import Any
 
@@ -43,3 +44,15 @@ def _strip_strings(value: Any) -> Any:
 def normalise(raw_input: dict[str, Any]) -> str:
     stripped = _strip_strings(raw_input)
     return json.dumps(stripped, sort_keys=True, separators=(",", ":"))
+
+
+def derive_task_key(raw_input: dict[str, Any]) -> str:
+    """task_key = sha256(normalised_input), hex digest, no prefix.
+
+    ADR-0002 defines task_key as hash(source_id, normalised_input) — a source
+    identifier combined with the content hash. There is no source_id concept
+    anywhere in the pipeline yet (no batch/source model exists), so this
+    hashes normalised_input alone for now. Deliberate simplification, not a
+    forgotten half of the ADR: revisit once a real source_id exists.
+    """
+    return hashlib.sha256(normalise(raw_input).encode("utf-8")).hexdigest()

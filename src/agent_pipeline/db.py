@@ -15,4 +15,8 @@ def get_engine() -> Engine:
 
 
 def get_session() -> Session:
-    return Session(get_engine())
+    # expire_on_commit=False: callers (e.g. runner/single.py) return ORM
+    # objects out of the session's `with` block after a commit; the default
+    # would expire their attributes on commit and then fail to reload them
+    # once the session is closed.
+    return Session(get_engine(), expire_on_commit=False)
