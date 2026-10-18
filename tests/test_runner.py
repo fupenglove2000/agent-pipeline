@@ -8,7 +8,7 @@ from testcontainers.community.postgres import PostgresContainer
 
 from agent_pipeline import db
 from agent_pipeline.config import get_settings
-from agent_pipeline.graph.build import MAX_PARSE_ATTEMPTS
+from agent_pipeline.graph.build import MAX_PARSE_ATTEMPTS, TRANSIENT_MAX_ATTEMPTS
 from agent_pipeline.graph.failures import FailureCategory, UnclassifiedFailureError
 from agent_pipeline.llm import LLMResponse
 from agent_pipeline.models import AttemptOutcome, Base, Task, TaskAttempt, TaskStatus
@@ -21,13 +21,18 @@ BAD_RESPONSE = "not json"
 
 
 class FakeChatModel:
-    def __init__(self, responses: list[LLMResponse]) -> None:
-        self._responses: Iterator[LLMResponse] = iter(responses)
+    """Plays back a script; an Exception in the script is raised instead of returned."""
+
+    def __init__(self, script: list[LLMResponse | Exception]) -> None:
+        self._script: Iterator[LLMResponse | Exception] = iter(script)
         self.call_count = 0
 
     def complete(self, prompt: str) -> LLMResponse:
         self.call_count += 1
-        return next(self._responses)
+        step = next(self._script)
+        if isinstance(step, Exception):
+            raise step
+        return step
 
 
 class RaisingChatModel:
@@ -166,7 +171,10 @@ def test_systemic_failure_propagates_instead_of_being_recorded_as_a_task_failure
     llm = RaisingChatModel(auth_error)
 
     with pytest.raises(openai.AuthenticationError):
-        run_task(raw_input, llm=llm)
+        run_task(raw_input, llm=llm, retry_backoff=False)
+
+    # Not transient, so call_model's RetryPolicy must not retry it even once.
+    assert llm.call_count == 1
 
     # Not swallowed into a task failure: no attempt row, and the task is left
     # RUNNING (non-terminal) so it is picked up again once credentials are fixed.
@@ -174,15 +182,56 @@ def test_systemic_failure_propagates_instead_of_being_recorded_as_a_task_failure
     assert _attempts_for(raw_input) == []
 
 
-def test_transient_failure_is_recorded_and_leaves_the_task_running(prepared_db: None) -> None:
+def test_transient_failure_that_recovers_within_the_cap_succeeds(prepared_db: None) -> None:
+    raw_input = {"text": "briefly-rate-limited"}
+    llm = FakeChatModel(
+        [
+            _openai_status_error(openai.RateLimitError, 429),
+            _openai_status_error(openai.RateLimitError, 429),
+            LLMResponse(text=GOOD_RESPONSE, token_usage=4),
+        ]
+    )
+
+    task = run_task(raw_input, llm=llm, retry_backoff=False)
+
+    assert task.status == TaskStatus.SUCCEEDED
+    assert llm.call_count == 3
+    attempts = _attempts_for(raw_input)
+    assert len(attempts) == 1
+    assert attempts[0].outcome == AttemptOutcome.SUCCEEDED
+
+
+def test_server_error_that_recovers_within_the_cap_succeeds(prepared_db: None) -> None:
+    raw_input = {"text": "briefly-unavailable"}
+    llm = FakeChatModel(
+        [
+            _openai_status_error(openai.InternalServerError, 503),
+            _openai_status_error(openai.InternalServerError, 500),
+            LLMResponse(text=GOOD_RESPONSE, token_usage=4),
+        ]
+    )
+
+    task = run_task(raw_input, llm=llm, retry_backoff=False)
+
+    assert task.status == TaskStatus.SUCCEEDED
+    assert llm.call_count == 3
+    attempts = _attempts_for(raw_input)
+    assert len(attempts) == 1
+    assert attempts[0].outcome == AttemptOutcome.SUCCEEDED
+
+
+def test_persistent_transient_failure_stops_at_the_cap_and_leaves_the_task_running(
+    prepared_db: None,
+) -> None:
     raw_input = {"text": "rate-limited"}
     llm = RaisingChatModel(_openai_status_error(openai.RateLimitError, 429))
 
-    task = run_task(raw_input, llm=llm)
+    task = run_task(raw_input, llm=llm, retry_backoff=False)
 
-    # Retrying is not this layer's job; the task stays non-terminal for a later run.
+    # The graph's RetryPolicy retried up to its cap; run_task adds no retry of its
+    # own and leaves the task non-terminal for a later run.
+    assert llm.call_count == TRANSIENT_MAX_ATTEMPTS
     assert task.status == TaskStatus.RUNNING
-    assert llm.call_count == 1
     attempts = _attempts_for(raw_input)
     assert len(attempts) == 1
     assert attempts[0].outcome == AttemptOutcome.FAILED
@@ -192,8 +241,13 @@ def test_transient_failure_is_recorded_and_leaves_the_task_running(prepared_db: 
 def test_unclassified_failure_propagates_and_writes_no_attempt(prepared_db: None) -> None:
     raw_input = {"text": "weird"}
 
+    llm = RaisingChatModel(RuntimeError("never seen"))
+
     with pytest.raises(UnclassifiedFailureError):
-        run_task(raw_input, llm=RaisingChatModel(RuntimeError("never seen")))
+        run_task(raw_input, llm=llm, retry_backoff=False)
+
+    # Unknown exceptions are not retried: they reach run_task on the first failure.
+    assert llm.call_count == 1
 
     assert _task_for(raw_input).status == TaskStatus.RUNNING
     assert _attempts_for(raw_input) == []
@@ -212,6 +266,8 @@ def test_non_retryable_failure_abandons_immediately(
 
     assert task.status == TaskStatus.ABANDONED
     assert llm.call_count == 1
+    # Abandoning still records the failure and its category (ADR-0003).
     attempts = _attempts_for(raw_input)
     assert len(attempts) == 1
+    assert attempts[0].outcome == AttemptOutcome.FAILED
     assert attempts[0].failure_category == FailureCategory.NON_RETRYABLE.value

@@ -128,3 +128,76 @@ there. That is an accepted gap for now, not an oversight — closing it
   OpenAI SDK can raise — they are exhaustive of what has been observed to
   matter so far. A failure that doesn't fit any row is a bug to fix in this
   table, not a case to force into the nearest category.
+
+## Implementation notes (2026-10-18)
+
+Wiring this table into `run_task` (`graph/failures.py`, `runner/single.py`)
+settled several points the decision above left open. They are recorded here
+because each is a behaviour a reviewer will see in the code and ask about.
+
+**Where retries live.** Transient failures are retried by a LangGraph
+`RetryPolicy` on the `call_model` node (3 attempts, exponential backoff with
+jitter), counted independently of `MAX_PARSE_ATTEMPTS`. The OpenAI SDK's own
+built-in retry is explicitly disabled. Left on, the two layers multiply — each
+graph attempt can itself be retried several times inside the SDK — and the cap
+in the table above would no longer be the real cap. The cost of owning retries
+in one layer: the SDK honours `Retry-After` headers on rate-limit responses,
+and our policy does not yet.
+
+Disabling the SDK's retry also means inheriting what it used to cover. Its
+retry conditions were compared against the transient category, and server
+errors (5xx, `InternalServerError`) were added to it. The SDK also retried 408
+and 409; both were left out on purpose. They are rare for chat completions,
+and 408 has no dedicated exception class — covering it would mean matching the
+base status-error class and branching on the status code, pulling the whole
+base class into classification. If either occurs, it surfaces as an
+unclassified failure, to be added to the table deliberately. Tests pin this
+choice, so adding them later is a visible decision rather than a drive-by edit.
+
+**What the retry predicate may see.** Which exceptions count as transient is
+decided in `graph/failures.py`, not in the graph. The predicate passed to the
+graph returns `False` for anything it does not recognise, so an unknown
+exception is never retried; it reaches `run_task`, where classification raises
+`UnclassifiedFailureError`. There is no default category: an exception outside
+the table is a gap in the table.
+
+**Outcome per category once the graph gives up:**
+
+| Category | `task_attempt` row | `Task.status` |
+|---|---|---|
+| Malformed output (cap reached) | FAILED, category recorded | ABANDONED |
+| Non-retryable | FAILED, category recorded | ABANDONED |
+| Transient (cap reached) | FAILED, category recorded | stays RUNNING |
+| Systemic | none | stays RUNNING; exception re-raised |
+
+Two of these rows need justification:
+
+- *Transient after the cap does not abandon.* Exhausting transient retries says
+  the environment was unhealthy for a few seconds, not that the task is bad.
+  Abandoning would throw away a task that will very likely succeed in a later
+  run, so it stays RUNNING to be picked up again.
+- *Systemic writes no attempt row.* This is a deliberate exception to
+  ADR-0002's "every execution appends a `task_attempt` row". A systemic failure
+  (expired credentials, unreachable database) belongs to the run, not to the
+  task in hand. Recording it against the task would make a healthy task's
+  history look failed, and when the database is what failed, the write may not
+  succeed anyway. The run-level record of an abort belongs to the runner, which
+  does not exist yet.
+
+**Known gaps, accepted for now:**
+
+- No exception maps to *non-retryable* yet. A provider refusal may arrive as a
+  normal response (for example a content-filter finish reason) rather than as
+  an exception. In that case it currently fails parsing and is retried as
+  malformed output — the waste this ADR exists to prevent. To be confirmed
+  against the real API.
+- `OperationalError` is treated as "database unreachable", but deadlocks and
+  serialisation failures share that type and are transient. Harmless while
+  execution is single-process; to be narrowed when the runner adds concurrency.
+- When the graph raises, its state is lost, so tokens spent by earlier
+  successful model calls in that execution are recorded as 0. Checkpoint
+  persistence fixes this by keeping the last saved state readable.
+- `run_task` sets RUNNING without a lease, so `reclaimable_tasks()` cannot see
+  tasks left RUNNING by the transient and systemic paths. Re-running the same
+  input picks them up today; the lease belongs with the runner, the first
+  caller of `reclaimable_tasks()`.

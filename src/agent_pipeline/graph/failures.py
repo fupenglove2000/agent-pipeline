@@ -36,9 +36,32 @@ class UnclassifiedFailureError(Exception):
     """An exception ADR-0003's table has no row for."""
 
 
+# The SDK's own retries are off (see llm.py), so the transient cases it used to
+# retry are this table's to cover. APITimeoutError subclasses APIConnectionError;
+# both are listed for readability. InternalServerError is every 5xx.
+#
+# Deliberately not covered: 408 and 409, which the SDK also retried. Both are
+# rare for chat completions, and 408 has no class of its own (it arrives as the
+# APIStatusError base), so covering it means matching the base class plus a status
+# check. Until one is actually seen, letting it surface as UnclassifiedFailureError
+# is the ADR-0003 way to find out it matters, and then add a row on purpose.
+_TRANSIENT_ERRORS = (
+    openai.RateLimitError,
+    openai.InternalServerError,
+    openai.APITimeoutError,
+    openai.APIConnectionError,
+)
+
+
+def is_transient(exc: Exception) -> bool:
+    """Retry predicate for the graph's RetryPolicy. Unlike classify_failure it never
+    raises: an unknown exception is simply not retried, so it reaches run_task
+    unchanged and is turned into UnclassifiedFailureError there."""
+    return isinstance(exc, _TRANSIENT_ERRORS)
+
+
 def classify_failure(exc: Exception) -> FailureCategory:
-    # APITimeoutError subclasses APIConnectionError; both are listed for readability.
-    if isinstance(exc, openai.RateLimitError | openai.APITimeoutError | openai.APIConnectionError):
+    if is_transient(exc):
         return FailureCategory.TRANSIENT
     if isinstance(exc, ValidationError):
         return FailureCategory.MALFORMED_OUTPUT

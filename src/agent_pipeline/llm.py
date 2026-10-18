@@ -18,17 +18,25 @@ class ChatModel(Protocol):
 
 
 class OpenAIChatModel:
-    """Thin wrapper over the chat model. No retry logic — that's the graph's job.
+    """Thin wrapper over the chat model.
 
-    Not exercised by the test suite: doing so would need a live API key, and the
-    suite must run offline. Intentional gap, not an oversight — graph behaviour
-    is covered via the fake in tests/test_graph.py.
+    The openai SDK retries on its own by default (2 retries on connection errors,
+    timeouts, 408/409/429 and 5xx). That would stack under call_model's RetryPolicy
+    and turn ADR-0003's cap of 3 into up to 3 × 3 requests, so it is switched off
+    with max_retries=0: retrying lives in one place, and the cap is the real cap.
+    The cost: the SDK honours a rate-limit response's Retry-After header, and our
+    RetryPolicy does not read it yet — it backs off on its own schedule instead.
+
+    complete() is not exercised by the test suite: that would need a live API key,
+    and the suite must run offline. Graph behaviour is covered via fakes instead.
     """
 
     def __init__(self) -> None:
         settings = get_settings()
         self._model = ChatOpenAI(
-            model=settings.model_name, api_key=SecretStr(settings.openai_api_key)
+            model=settings.model_name,
+            api_key=SecretStr(settings.openai_api_key),
+            max_retries=0,
         )
 
     def complete(self, prompt: str) -> LLMResponse:

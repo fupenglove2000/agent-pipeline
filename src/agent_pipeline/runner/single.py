@@ -22,7 +22,9 @@ from agent_pipeline.normalize import derive_task_key
 TERMINAL_STATUSES = (TaskStatus.SUCCEEDED, TaskStatus.ABANDONED)
 
 
-def run_task(raw_input: dict[str, Any], llm: ChatModel | None = None) -> Task:
+def run_task(
+    raw_input: dict[str, Any], llm: ChatModel | None = None, *, retry_backoff: bool = True
+) -> Task:
     task_key = derive_task_key(raw_input)
 
     with get_session() as session:
@@ -47,7 +49,7 @@ def run_task(raw_input: dict[str, Any], llm: ChatModel | None = None) -> Task:
         task.status = TaskStatus.RUNNING
         session.commit()
 
-        graph = build_graph(llm or OpenAIChatModel())
+        graph = build_graph(llm or OpenAIChatModel(), retry_backoff=retry_backoff)
         started = time.monotonic()
 
         tokens: int
@@ -77,9 +79,11 @@ def run_task(raw_input: dict[str, Any], llm: ChatModel | None = None) -> Task:
             # graph.invoke raising discards its state, so tokens spent on earlier
             # parse retries within this execution are not recorded here.
             tokens, parsed_result = 0, None
-            # TRANSIENT (and a MALFORMED_OUTPUT that escapes the graph) stays
-            # RUNNING: retrying is not done at this layer. NON_RETRYABLE is
-            # abandoned immediately, per ADR-0003.
+            # A TRANSIENT failure reaching here has already used call_model's
+            # RetryPolicy (TRANSIENT_MAX_ATTEMPTS); this layer adds no retry of its
+            # own and leaves the task RUNNING for a later run. A MALFORMED_OUTPUT
+            # escaping the graph is treated the same. NON_RETRYABLE is abandoned
+            # immediately, per ADR-0003.
             abandon = category is FailureCategory.NON_RETRYABLE
         else:
             tokens = final_state["total_tokens"]
